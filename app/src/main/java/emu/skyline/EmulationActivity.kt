@@ -69,6 +69,9 @@ import java.nio.ByteOrder
 import java.util.concurrent.FutureTask
 import javax.inject.Inject
 import kotlin.math.abs
+import android.os.BatteryManager
+import emu.skyline.utils.bool
+import java.util.concurrent.TimeUnit
 
 
 private const val ActionPause = "${BuildConfig.APPLICATION_ID}.ACTION_EMULATOR_PAUSE"
@@ -174,6 +177,9 @@ class EmulationActivity : AppCompatActivity(), SurfaceHolder.Callback, View.OnTo
     var averageFrametime : Float = 0.0f
     var averageFrametimeDeviation : Float = 0.0f
     var ramUsage : Long = 0
+    var lastBatteryLevel: Int = -1
+    var lastUpdateTime: Long = -1
+    var lastEstimatedTime: String = ""
 
     /**
      * Writes the current performance statistics into [fps], [averageFrametime] and [averageFrametimeDeviation] fields
@@ -342,9 +348,64 @@ class EmulationActivity : AppCompatActivity(), SurfaceHolder.Callback, View.OnTo
                 postDelayed(object : Runnable {
                     override fun run() {
                         updatePerformanceStatistics()
-                        // We read the `VmRSS` value from the kernel
-                        ramUsage = File("/proc/self/statm").readLines()[0].split(' ')[1].toLong() * 4096 / 1000000
-                        text = "$fps FPS • $ramUsage MB"
+
+                        fun estimateRemainingTime(currentBatteryPercentage: Float): String {
+                            if (lastBatteryLevel == -1) {
+                                // First time calculation, just store the current level and time
+                                lastBatteryLevel = currentBatteryPercentage.toInt()
+                                lastUpdateTime = System.currentTimeMillis()
+                                var estimateStart = (currentBatteryPercentage.toInt() * 3.0).toLong()
+                                var estimateStartHours = TimeUnit.MINUTES.toHours(estimateStart)
+                                val estimateStartMinutes = estimateStart - TimeUnit.HOURS.toMinutes(estimateStartHours)
+                                lastEstimatedTime = "%dh %dm".format(estimateStartHours, estimateStartMinutes)
+                                return lastEstimatedTime
+                            }
+
+                            val timePassedMillis = System.currentTimeMillis() - lastUpdateTime
+                            val batteryChange = lastBatteryLevel - currentBatteryPercentage.toInt()
+
+                            if (batteryChange == 0) {
+                                // No change in battery level, return the last estimated time
+                                return lastEstimatedTime
+                            }
+
+                            val timePerPercentMillis = timePassedMillis / batteryChange
+
+                            val remainingBattery = currentBatteryPercentage.toInt() - batteryChange
+
+                            val remainingTimeMillis = remainingBattery * timePerPercentMillis
+
+                            val hours = TimeUnit.MILLISECONDS.toHours(remainingTimeMillis)
+                            val minutes = TimeUnit.MILLISECONDS.toMinutes(remainingTimeMillis % TimeUnit.HOURS.toMillis(1))
+
+                            lastBatteryLevel = currentBatteryPercentage.toInt()
+                            lastUpdateTime = System.currentTimeMillis()
+                            lastEstimatedTime = "%dh %dm".format(hours, minutes)
+                            return lastEstimatedTime
+                        }
+
+                        fun updateBatteryInfo() {
+                            val batteryStatus: Intent? = IntentFilter(Intent.ACTION_BATTERY_CHANGED).let { ifilter ->
+                                applicationContext.registerReceiver(null, ifilter)
+                            }
+
+                            val level = batteryStatus?.getIntExtra(BatteryManager.EXTRA_LEVEL, -1) ?: -1
+
+                            val batteryPercentage = level.toFloat()
+
+                            val estimatedTime = estimateRemainingTime(batteryPercentage)
+
+                            if (estimatedTime != "Calculating...") {
+                                lastEstimatedTime = estimatedTime
+                            }
+
+                            // Display the information
+                            // We read the `VmRSS` value from the kernel
+                            ramUsage = File("/proc/self/statm").readLines()[0].split(' ')[1].toLong() * 4096 / 1000000
+                            text = "$fps FPS • $ramUsage MB\n${batteryPercentage.toInt()}% • $estimatedTime"
+                        }
+
+                        updateBatteryInfo()
                         postDelayed(this, 250)
                     }
                 }, 250)
